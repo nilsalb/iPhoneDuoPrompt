@@ -25,7 +25,7 @@ The result:
 | 4. Custom layouts and the fold | Reserved regions (`.division`, `.occlusion`) |
 | 5. The cover screen | What to check on the wide, short folded display |
 | 6. What not to do | Every shortcut that was tried and failed |
-| 7. Verification checklist | Screenshotting each display, changing poses, folding and launching while folded, a UI test that proves the columns scroll independently, and regression runs on an iPhone 14 Plus |
+| 7. Verification checklist | Screenshotting each display, changing poses in DeviceHub (including open upright), folding and launching while folded, a UI test that proves the columns scroll independently, and regression runs on an iPhone 14 Plus |
 
 ## Dead ends, so your agent skips them
 
@@ -39,14 +39,19 @@ Every one of these was tried in a real app and failed:
 - `.toolbarTitleDisplayMode(.inlineLarge)`: still shrinks when the other column scrolls.
 - `scrollEdgeEffectHidden` on one column only: leaves a hard seam.
 - Trusting `splitArrangementAxis` to detect the split: it read nil.
-- Trusting the secondary column's `onAppear`/`onDisappear` alone: it reported "split" on the folded cover screen, so content went missing there.
+- Trusting the secondary column's `onAppear`/`onDisappear` alone: on the folded cover screen the system still builds that column, so content went missing there. Three apps hit this.
 - Swapping between a custom tab bar and the system `TabView` on every environment change: it resets navigation and open sheets.
+- Moving a panel that's a bottom sheet on other iPhones into the second column without a fallback: open and held upright, the split can't happen and the panel disappears.
 
 ## Requirements
 
 - Xcode 27.1 with the iOS 27.1 simulator runtime and the "iPhone Duo" device type
 - Your release Xcode (27.0) for App Store builds and regression runs
 - A SwiftUI app (the UIKit equivalents are named in the prompt)
+
+## About
+
+I build my own iOS apps for endurance sports (fueling plans, swim workouts, indoor training and more). Migrating them to the iPhone Duo by hand took a lot of time, so I put every tweak and fix from that work into this prompt. The next app doesn't have to start from scratch.
 
 ## Feedback
 

@@ -52,6 +52,9 @@ Use Apple's components and documented APIs only. **Don't hand-build layouts.** E
 
 - Use the standard `TabView`, `NavigationStack` and `.toolbar`. The system moves the tab bar, navigation items and status bar into the vertical bar by itself.
 - Custom tab bars and standalone `UINavigationBar`/`UIToolbar` instances don't take part in the vertical bar.
+- **If the app has a custom tab bar** and must look the same on other iPhones, use the system `TabView` only where the system has a vertical bar. Read `@Environment(\.toolbarVerticalEdge)` (iOS 27.1). It's nil on hardware without a vertical bar.
+  - In UIKit, read the `verticalBarEdge` trait instead. It's unspecified wherever the system never shows a vertical bar.
+  - Latch the choice: once it's been non-nil, keep the system `TabView` for the rest of the session. Swapping tab containers mid-session rebuilds every tab and drops its navigation path and open sheets.
 - Give every tab and toolbar item **both a title and an SF Symbol**, so the system can choose the compact vertical representation.
 - You can't set where the tab rail sits vertically; the system positions it. Don't fight it.
 - `.toolbarVerticalBehavior(.disabled)` and `preferredVerticalBarBehavior = .disabled` opt a screen out of the vertical bar. They're only for screens like full-screen video or a calculator. Never use them to fix spacing.
@@ -81,17 +84,31 @@ NavigationStack {
 
 ### 3a. Knowing whether the secondary is showing
 
-The documentation says `@Environment(\.splitArrangementAxis)` is non-nil inside a split. **In testing it read nil in both columns even with both visible.** Use this instead: the arrangement only builds the secondary when it's shown, so track it.
+The documentation says `@Environment(\.splitArrangementAxis)` is non-nil inside a split. **In testing it read nil in both columns even with both visible.**
+
+The secondary's `onAppear`/`onDisappear` alone **isn't reliable either**. Three apps hit the same bug: on the cover screen the system **still builds the secondary**, stacked at the same full-width frame as the primary, so `onAppear` fires although nothing is beside the primary. The primary then leaves out content that's nowhere on screen. Combine it with the column widths: the secondary is showing only if it's built **and** the primary is narrower than the whole arrangement.
 
 ```swift
-@State private var besideShowing = false
+@State private var secondaryBuilt = false
+@State private var primaryWidth: CGFloat = 0
+@State private var totalWidth: CGFloat = 0
+private var besideShowing: Bool {
+    secondaryBuilt && primaryWidth > 0 && primaryWidth < totalWidth - 1
+}
 …
+ArrangementView {
+    MainScreen()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { primaryWidth = $0 }
 } secondary: {
     SupportingScreen()
-        .onAppear { besideShowing = true }
-        .onDisappear { besideShowing = false }
+        .onAppear { secondaryBuilt = true }
+        .onDisappear { secondaryBuilt = false }
 }
+.arrangementViewStyle(.split.axes(.horizontal))
+.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { totalWidth = $0 }
 ```
+
+Measured on the Duo simulator: open flat, the arrangement was 867pt wide with a 433.5pt primary; folded, both were 382pt.
 
 Pass `besideShowing` down through a custom `EnvironmentValues` entry. The primary uses it to **leave out content the secondary already shows**: no duplicate charts or summaries. Each piece of information appears once.
 
@@ -108,6 +125,7 @@ Pass `besideShowing` down through a custom `EnvironmentValues` entry. The primar
 - `listSectionMargins(_:_:)` only works when applied to each `Section`, not to the `List`.
 - Don't apply any of this when not split. Setting 0 elsewhere overrides the system default.
 - Measure the result: the outer margin should equal the fold-side margin, which gives a 40pt gutter.
+- If a column's content already pads both sides itself (for example `ScrollView { … }.padding(.horizontal, 18)`), it already has a fold-side margin. Don't add another; measure and check that outer equals fold-side.
 
 ### 3c. Background behind the fold
 
@@ -152,6 +170,13 @@ Both columns share one navigation bar, and **the bar reacts to whichever column 
 - Remove anything from the primary that the secondary now shows, but only while split.
 - Within cards, use standard components: `LabeledContent` for label/value rows, a separate `NavigationLink` row for drill-ins (never a card that's a link *and* draws its own chevron), and Swift Charts' `AxisMarks(values: .automatic(desiredCount:))` so axis labels don't collide at new widths.
 
+### 3g. Open and held upright
+
+- The Duo can be open and held upright. The fold then runs **across** the screen, so `.split.axes(.horizontal)` can't split and shows **only the primary**, exactly like the cover screen.
+- That's fine when the secondary is purely supporting content and the primary takes it back (§3a). It's a bug when the secondary is the **only home** for something, for example a panel that's a bottom sheet on other iPhones: upright, it simply disappears.
+- Fix it by restoring the original presentation whenever the split isn't showing, so the sheet comes back. Allowing both axes (map above, panel below the fold) also works, but one user found that worse than the sheet. Ask before choosing.
+- Size classes can't tell open-upright from open-flat; both are regular × regular. If you need to know, compare the window's width to its height.
+
 ### Reference implementation (SwiftUI)
 
 ```swift
@@ -164,21 +189,31 @@ struct TodayTab: View {
 struct BesideSupport<Main: View>: View {
     let kind: SupportKind
     @ViewBuilder var main: Main
-    @State private var besideShowing = false
+    @State private var secondaryBuilt = false
+    @State private var primaryWidth: CGFloat = 0
+    @State private var totalWidth: CGFloat = 0
+    // See §3a: onAppear alone isn't enough, so also compare widths.
+    private var besideShowing: Bool {
+        secondaryBuilt && primaryWidth > 0 && primaryWidth < totalWidth - 1
+    }
 
     var body: some View {
         #if canImport(SwiftUICore, _version: 8.0.85)
         if #available(iOS 27.1, *) {
             ArrangementView {
                 ArrangedColumn(edgeAtFold: .trailing, split: besideShowing) { main }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { primaryWidth = $0 }
                     .scrollEdgeEffectStyle(besideShowing ? .soft : .automatic, for: .top)
+                    .accessibilityIdentifier("primaryColumn")
             } secondary: {
                 ArrangedColumn(edgeAtFold: .leading, split: true) { SupportView(kind: kind) }
                     .scrollEdgeEffectStyle(.soft, for: .top)
-                    .onAppear { besideShowing = true }
-                    .onDisappear { besideShowing = false }
+                    .accessibilityIdentifier("secondaryColumn")
+                    .onAppear { secondaryBuilt = true }
+                    .onDisappear { secondaryBuilt = false }
             }
             .arrangementViewStyle(.split.axes(.horizontal))
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { totalWidth = $0 }
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         } else { main }
         #else
@@ -224,6 +259,8 @@ extension EnvironmentValues { @Entry var supportBeside = false }
   - `.occlusion` regions are the cameras.
 - Keep controls and critical content out of the division. Continuously scrolling content (lists, feeds, articles) doesn't need moving.
 - System sheets, alerts and menus already avoid the fold.
+- Your own floating overlays (mini players, bottom accessories, toasts) don't. While split, place them inside one column, usually the primary, on a solid background, instead of stretching across the fold.
+- **Partly open (book), check for overlap with the vertical bar.** In one app with a custom panel, the vertical bar was drawn over the panel's content without being counted in the safe area, while flat it was counted. No API reported its width. Measure on screen in this pose; don't assume flat-pose numbers carry over.
 
 ## 5. The cover screen
 
@@ -240,6 +277,9 @@ extension EnvironmentValues { @Entry var supportBeside = false }
 - `.toolbarTitleDisplayMode(.inlineLarge)` to stop the title resizing: it still shrinks when the other column scrolls. Use `.inline`.
 - `scrollEdgeEffectHidden` on one column only: leaves a hard seam.
 - Trusting `splitArrangementAxis` to detect the split: it read nil.
+- Trusting the secondary's `onAppear`/`onDisappear` alone: it read "split" on the folded cover screen, so content went missing there. Also compare column widths (§3a).
+- Swapping between a custom tab bar and the system `TabView` on every environment change: it resets navigation and sheets. Latch it (§2).
+- Moving a panel that's a sheet elsewhere into the secondary without a fallback: open upright, the split can't happen and the panel disappears (§3g).
 
 ## 7. Verification checklist
 
@@ -250,16 +290,23 @@ Use the Duo simulator: device type "iPhone Duo", 27.1 runtime, with the 27.1 Xco
   - Capture one with `xcrun simctl io <udid> screenshot --display=<display UUID> out.png`.
   - Captures are sometimes black. Retry until the file is a plausible size.
   - `XCUIScreen.main.screenshot()` captures the cover even when the device is open.
-- **Change poses in the Simulator** and check each one: folded, open flat and partly open (book).
-  - Folded: one column, vertical bar with tabs.
+- **Change poses** and check each one: folded, open flat, partly open (book) and **open upright**.
+  - Xcode 27.1 doesn't ship Simulator.app; poses are changed in **`DeviceHub.app`** (`<Xcode 27.1>/Contents/Applications/DeviceHub.app`). There's no `simctl` command for poses. If you can't drive DeviceHub, ask the user to change the pose.
+  - Simulator panels inside other tools may only show or drive the cover display, and their first tap is sometimes swallowed. Open screens with launch arguments and capture each display with `simctl io`.
+  - Folded: one column, vertical bar with tabs, and **every piece of content that a split screen moves into the secondary is back in the primary**.
+  - Test **folding while the app is open on a split screen** and **launching the app while folded**. Both are where split detection goes wrong.
   - Flat: two columns, 20pt outer margins, 40pt gutter.
-  - Book: the same, plus no white strip at the hinge.
+  - Book: the same, plus no white strip at the hinge and nothing under the vertical bar (§4).
+  - Open upright: one column, and nothing that lives in the secondary is missing (§3g).
 - **Write a UI test that proves the columns scroll independently** and run it on the Duo:
   ```swift
   func testColumnsScrollIndependently() throws {
       let secondary = app.descendants(matching: .any)["secondaryColumn"].firstMatch
       guard secondary.waitForExistence(timeout: 3) else { throw XCTSkip("no split here") }
-      let anchor = app.staticTexts["<text in the primary column>"].firstMatch
+      let primary = app.descendants(matching: .any)["primaryColumn"].firstMatch
+      // Scope queries to a column: the same text can exist in both (for example a product
+      // in a primary "what to bring" list and in the secondary timeline).
+      let anchor = primary.staticTexts["<text in the primary column>"].firstMatch
       let title = app.navigationBars.staticTexts["<Title>"].firstMatch
       let (y, h) = (anchor.frame.minY, title.frame.height)
       secondary.swipeUp(velocity: .slow); sleep(1)
@@ -272,4 +319,5 @@ Use the Duo simulator: device type "iPhone Duo", 27.1 runtime, with the 27.1 Xco
   - Also assert the swipe really scrolled the secondary: one of its elements moved or left the screen.
   - Assert the title **exists** before comparing its height; otherwise a missing title passes silently.
 - **Regression-test on the iPhone 14 Plus simulator** (iOS 27.0 runtime) with the release Xcode. Use only that device for regression runs, not some other iPhone. Run the full UI test suite; nothing should change there, and the Duo split tests should report "skipped".
+- The 27.1 simulator runtime **only runs the iPhone Duo**. So the 27.1 code path can't be tested on a regular iPhone yet; the iPhone 14 Plus run covers the 27.0 path. Say so in your report rather than claiming regular iPhones on 27.1 are verified.
 - Build with **both** Xcodes: 27.1 for the Duo, 27.0 for the release build.
